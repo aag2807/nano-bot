@@ -1,0 +1,17 @@
+fastapi
+uvicorn[standard]
+sqlalchemy
+pydantic
+python-multipart
+python-jose[cryptography]
+passlib[bcrypt]
+python-dotenv
+httpx
+pytest
+pytest-asyncio
+
+# Minimal AI dependencies (can be added later)
+# transformers
+# torch
+# langchain
+# langchain-huggingface
