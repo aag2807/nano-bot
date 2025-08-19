@@ -1,0 +1,28 @@
+# OCR Dependencies for NANO Banking Assistant
+
+# Core OCR libraries
+pytesseract>=0.3.10
+easyocr>=1.7.0
+Pillow>=10.0.0
+opencv-python>=4.8.0
+
+# PDF processing
+PyMuPDF>=1.23.0
+
+# Image processing
+numpy>=1.24.0
+
+# Optional: For better OCR preprocessing
+scikit-image>=0.21.0
+
+# Installation notes:
+# 1. For Tesseract OCR, you also need to install the Tesseract binary:
+#    - Windows: Download from https://github.com/UB-Mannheim/tesseract/wiki
+#    - macOS: brew install tesseract
+#    - Ubuntu: sudo apt install tesseract-ocr
+#
+# 2. EasyOCR will download models on first use (~100MB)
+#
+# 3. For production, consider using GPU acceleration:
+#    - Install torch with CUDA support
+#    - EasyOCR will automatically use GPU if available

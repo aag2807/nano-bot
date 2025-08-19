@@ -14,6 +14,7 @@ from nano.tools.identity import get_identity_tools
 from nano.tools.files import get_file_tools
 from nano.tools.database import get_database_tools
 from nano.tools.support import get_support_tools
+from nano.tools.ocr import get_ocr_tools
 from app.config import settings
 
 
@@ -30,6 +31,7 @@ class NANOAgent:
         self.file_tools = get_file_tools(db)
         self.database_tools = get_database_tools(db)
         self.support_tools = get_support_tools(db)
+        self.ocr_tools = get_ocr_tools(db)
         
         # Session management
         self.active_sessions = {}
@@ -136,11 +138,16 @@ class NANOAgent:
             conversation_history = self._get_conversation_history(session_id)
             session["conversation_history"] = conversation_history
             
-            # Analyze message and determine intent
-            intent = self._analyze_intent(message)
+            # Analyze message and determine intent with entities
+            intent_analysis = self._analyze_intent(message)
+            intent = intent_analysis["primary_intent"]
+            entities = intent_analysis.get("entities", {})
             
-            # Generate response based on intent and verification status
-            response = self._generate_response(session_id, message, intent, session)
+            # Log intent analysis for debugging
+            logger.info(f"Intent analysis: {intent_analysis}")
+            
+            # Generate response based on intent, entities, and verification status
+            response = self._generate_response(session_id, message, intent, session, entities, intent_analysis)
             
             # Save assistant response to database
             import json
@@ -172,50 +179,127 @@ class NANOAgent:
                 "error": True
             }
 
-    def _analyze_intent(self, message: str) -> str:
-        """Analyze customer message to determine intent."""
+    def _analyze_intent(self, message: str) -> Dict[str, any]:
+        """Analyze customer message to determine intent and extract entities."""
         message_lower = message.lower()
         
-        # Identity verification patterns
-        if any(keyword in message_lower for keyword in ["verify", "identity", "login", "authenticate"]):
-            return "identity_verification"
+        # Enhanced intent detection with confidence scores and entity extraction
+        intents = []
+        entities = {}
         
-        # Balance inquiry patterns
-        if any(keyword in message_lower for keyword in ["balance", "how much", "account total"]):
-            return "balance_inquiry"
+        # Identity verification patterns with context awareness
+        identity_keywords = ["verify", "identity", "login", "authenticate", "who am i", "my name"]
+        identity_score = sum(1 for kw in identity_keywords if kw in message_lower)
+        if identity_score > 0:
+            intents.append(("identity_verification", identity_score * 0.3))
+            
+        # Check for name and account patterns
+        import re
+        account_pattern = r'\b\d{6,}\b'
+        account_matches = re.findall(account_pattern, message)
+        if account_matches:
+            entities['account_number'] = account_matches[0]
+            intents.append(("identity_verification", 0.5))
+            
+        # Balance inquiry patterns with variations
+        balance_keywords = ["balance", "how much", "account total", "money", "funds", "available", "checking", "savings"]
+        balance_score = sum(1 for kw in balance_keywords if kw in message_lower)
+        if balance_score > 0:
+            intents.append(("balance_inquiry", balance_score * 0.4))
         
         # Transaction history patterns
-        if any(keyword in message_lower for keyword in ["history", "transactions", "recent", "statements"]):
-            return "transaction_history"
+        transaction_keywords = ["history", "transactions", "recent", "statements", "spent", "charges", "deposits", "withdrawals", "activity"]
+        transaction_score = sum(1 for kw in transaction_keywords if kw in message_lower)
+        if transaction_score > 0:
+            intents.append(("transaction_history", transaction_score * 0.35))
         
-        # Update information patterns
-        if any(keyword in message_lower for keyword in ["update", "change", "modify", "address", "phone", "email"]):
-            return "update_information"
+        # Update information patterns with entity extraction
+        update_keywords = ["update", "change", "modify", "new", "correct"]
+        contact_keywords = ["address", "phone", "email", "number", "contact"]
+        update_score = sum(1 for kw in update_keywords if kw in message_lower)
+        contact_score = sum(1 for kw in contact_keywords if kw in message_lower)
+        if update_score > 0 or contact_score > 0:
+            intents.append(("update_information", (update_score + contact_score) * 0.3))
+            
+            # Extract what needs updating
+            if "email" in message_lower:
+                entities['update_field'] = 'email'
+                email_pattern = r'\b[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Z|a-z]{2,}\b'
+                email_matches = re.findall(email_pattern, message)
+                if email_matches:
+                    entities['new_email'] = email_matches[0]
+            if "phone" in message_lower or "number" in message_lower:
+                entities['update_field'] = 'phone'
+                phone_pattern = r'\b\d{3}[-.]?\d{3}[-.]?\d{4}\b'
+                phone_matches = re.findall(phone_pattern, message)
+                if phone_matches:
+                    entities['new_phone'] = phone_matches[0]
+            if "address" in message_lower:
+                entities['update_field'] = 'address'
         
-        # File/document patterns
-        if any(keyword in message_lower for keyword in ["upload", "document", "file", "statement"]):
-            return "file_management"
+        # File/document patterns with OCR capability
+        file_keywords = ["upload", "document", "file", "statement", "download", "pdf", "attachment", "scan", "image", "photo"]
+        ocr_keywords = ["read", "extract", "text", "ocr", "analyze", "check", "receipt"]
+        file_score = sum(1 for kw in file_keywords if kw in message_lower)
+        ocr_score = sum(1 for kw in ocr_keywords if kw in message_lower)
         
-        # Help/support patterns
-        if any(keyword in message_lower for keyword in ["help", "how", "what", "explain", "support"]):
-            return "general_support"
+        if file_score > 0 or ocr_score > 0:
+            if ocr_score > 0:
+                intents.append(("document_ocr", (file_score + ocr_score) * 0.4))
+            else:
+                intents.append(("file_management", file_score * 0.35))
         
-        # Escalation patterns
-        if any(keyword in message_lower for keyword in ["human", "representative", "manager", "escalate", "complain"]):
-            return "escalation"
+        # Help/support patterns - lower priority
+        help_keywords = ["help", "how", "what", "explain", "support", "assist", "can you"]
+        help_score = sum(1 for kw in help_keywords if kw in message_lower)
+        if help_score > 0:
+            intents.append(("general_support", help_score * 0.2))
+        
+        # Escalation patterns - high priority
+        escalation_keywords = ["human", "representative", "manager", "escalate", "complain", "supervisor", "agent", "person", "speak to"]
+        escalation_score = sum(1 for kw in escalation_keywords if kw in message_lower)
+        if escalation_score > 0:
+            intents.append(("escalation", escalation_score * 0.5))
         
         # Greeting patterns
-        if any(keyword in message_lower for keyword in ["hello", "hi", "good morning", "good afternoon", "hey"]):
-            return "greeting"
+        greeting_keywords = ["hello", "hi", "good morning", "good afternoon", "good evening", "hey", "greetings"]
+        if any(kw in message_lower for kw in greeting_keywords) and len(message_lower.split()) < 10:
+            intents.append(("greeting", 0.8))
         
-        return "general_inquiry"
+        # Sort intents by confidence score
+        intents.sort(key=lambda x: x[1], reverse=True)
+        
+        # Return the highest confidence intent or general_inquiry
+        primary_intent = intents[0][0] if intents else "general_inquiry"
+        confidence = intents[0][1] if intents else 0.1
+        
+        return {
+            "primary_intent": primary_intent,
+            "confidence": confidence,
+            "all_intents": intents,
+            "entities": entities
+        }
 
-    def _generate_response(self, session_id: str, message: str, intent: str, session: Dict) -> Dict[str, any]:
-        """Generate appropriate response based on intent and context."""
+    def _generate_response(self, session_id: str, message: str, intent: str, session: Dict, entities: Dict = None, intent_analysis: Dict = None) -> Dict[str, any]:
+        """Generate appropriate response based on intent, entities, and context."""
         
         is_verified = session.get("is_verified", False)
         customer_id = session.get("customer_id")
         tools_used = []
+        entities = entities or {}
+        intent_analysis = intent_analysis or {}
+        
+        # Check conversation context for follow-up questions
+        conversation_history = session.get("conversation_history", [])
+        if conversation_history:
+            last_message = conversation_history[-1] if conversation_history else None
+            if last_message and last_message.get("role") == "assistant":
+                # Check if we're waiting for specific information
+                if "provide your full name and account number" in last_message.get("message", ""):
+                    # Override intent to identity verification if we're waiting for credentials
+                    if entities.get("account_number") or "name" in message.lower():
+                        intent = "identity_verification"
+                        logger.info(f"Context override: Detected identity verification attempt")
         
         # Handle greeting
         if intent == "greeting":
@@ -247,7 +331,7 @@ class NANOAgent:
                 }
         
         # Check if verification is required for sensitive operations
-        sensitive_intents = ["balance_inquiry", "transaction_history", "update_information", "file_management"]
+        sensitive_intents = ["balance_inquiry", "transaction_history", "update_information", "file_management", "document_ocr"]
         
         if intent in sensitive_intents and not is_verified:
             return {
@@ -257,14 +341,14 @@ class NANOAgent:
                 "next_intent": intent
             }
         
-        # Handle identity verification
-        if intent == "identity_verification" or not is_verified:
-            # Extract potential verification info from message
-            return self._handle_identity_verification(session_id, message, session)
+        # Handle identity verification with extracted entities
+        if intent == "identity_verification" or (not is_verified and entities.get("account_number")):
+            # Use extracted entities for verification
+            return self._handle_identity_verification(session_id, message, session, entities)
         
-        # Handle verified requests
+        # Handle verified requests with entities
         if is_verified and customer_id:
-            return self._handle_verified_request(session_id, message, intent, customer_id, session)
+            return self._handle_verified_request(session_id, message, intent, customer_id, session, entities)
         
         # Handle general support
         if intent == "general_support":
@@ -291,19 +375,20 @@ class NANOAgent:
             "session_id": session_id
         }
 
-    def _handle_identity_verification(self, session_id: str, message: str, session: Dict) -> Dict[str, any]:
-        """Handle identity verification process."""
-        logger.info(f"_handle_identity_verification called for session {session_id}, awaiting_security_answer={session.get('awaiting_security_answer', False)}")
+    def _handle_identity_verification(self, session_id: str, message: str, session: Dict, entities: Dict = None) -> Dict[str, any]:
+        """Handle identity verification process with entity extraction."""
+        logger.info(f"_handle_identity_verification called for session {session_id}, awaiting_security_answer={session.get('awaiting_security_answer', False)}, entities={entities}")
+        entities = entities or {}
         
-        # Simple extraction (in production, use more sophisticated NLP)
-        words = message.split()
-        
-        # Look for account number (assume it's a sequence of digits)
-        account_number = None
-        for word in words:
-            if word.isdigit() and len(word) >= 6:
-                account_number = word
-                break
+        # Use entities if available, otherwise extract
+        account_number = entities.get('account_number')
+        if not account_number:
+            # Fallback to simple extraction
+            words = message.split()
+            for word in words:
+                if word.isdigit() and len(word) >= 6:
+                    account_number = word
+                    break
         
         # Extract name (assume first few words before account number or common patterns)
         full_name = None
@@ -410,9 +495,13 @@ class NANOAgent:
             "requires_verification": True
         }
 
-    def _handle_verified_request(self, session_id: str, message: str, intent: str, customer_id: str, session: Dict) -> Dict[str, any]:
-        """Handle requests from verified customers."""
+    def _handle_verified_request(self, session_id: str, message: str, intent: str, customer_id: str, session: Dict, entities: Dict = None) -> Dict[str, any]:
+        """Handle requests from verified customers with entity awareness."""
         tools_used = []
+        entities = entities or {}
+        
+        # Proactively use tools based on intent and entities
+        logger.info(f"Handling verified request: intent={intent}, entities={entities}")
         
         if intent == "balance_inquiry":
             result = self.database_tools.query_account_balance(session_id, customer_id)
@@ -436,11 +525,35 @@ class NANOAgent:
                 response = "I don't see any recent transactions on your account."
         
         elif intent == "update_information":
-            response = "I can help update your contact information. What would you like to change - your email, phone number, or address? Please let me know the new information."
-            # This would require additional parsing for the specific update
+            # Check if we have the necessary entities to perform the update
+            if entities.get('update_field') and (entities.get('new_email') or entities.get('new_phone')):
+                # Proactively update the information
+                update_field = entities['update_field']
+                updates = {}
+                
+                if update_field == 'email' and entities.get('new_email'):
+                    updates['email'] = entities['new_email']
+                elif update_field == 'phone' and entities.get('new_phone'):
+                    updates['phone'] = entities['new_phone']
+                
+                if updates:
+                    result = self.database_tools.update_customer_record(session_id, customer_id, updates)
+                    tools_used.append("update_customer_record")
+                    
+                    if result["success"]:
+                        response = f"I've successfully updated your {update_field} to {list(updates.values())[0]}. Is there anything else I can help you with?"
+                    else:
+                        response = f"I encountered an issue updating your {update_field}. {result['message']}"
+                else:
+                    response = "I can help update your contact information. What would you like to change - your email, phone number, or address? Please provide the new information."
+            else:
+                response = "I can help update your contact information. What would you like to change - your email, phone number, or address? Please provide the new information."
         
         elif intent == "file_management":
             response = "I can help with document management. Would you like to upload a document, view your existing documents, or organize your files?"
+        
+        elif intent == "document_ocr":
+            response = "I can help you process documents using OCR technology to extract text and banking information. Please upload your document (PDF, image, or scan) and I'll analyze it for you. What type of document would you like me to process?"
         
         else:
             # General inquiry for verified user
